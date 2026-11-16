@@ -97,9 +97,11 @@ machine, not one per project, because the kernel is one interpreter for the whol
 `pip` otherwise, seeded with `pip`, `pywin32` on Windows (which is what puts `win32com` in reach), and — when
 this machine has the `draftsight-py` OpenCode skill installed — `draftsight` itself: it is not on PyPI, so it
 goes in `--editable` from `~/.config/opencode/skills/draftsight-py` (`PYTOOL_DRAFTSIGHT_SKILL` moves it),
-which means an edit to the skill lands in the venv with no reinstall. Optional packages are probed on the
-*ready* path too, so a skill added after the venv was built still gets added to it. If `python3` or the
-network is missing it says so plainly instead of half-building. `PYTOOL_VENV` moves it;
+which means an edit to the skill lands in the venv with no reinstall — the skill is under development, so
+editable is the form that keeps that loop short; only if the editable build itself fails does the venv get a
+plain copy, and the log line then says skill edits will not take effect until a reinstall. Optional packages
+are probed on the *ready* path too, so a skill added after the venv was built still gets added to it. If
+`python3` or the network is missing it says so plainly instead of half-building. `PYTOOL_VENV` moves it;
 `PYTOOL_SKIP_VENV=1` defers the build. The builder runs in-process as a module (`src/engine/venv-bootstrap.ts`
 imports it) — never as `process.execPath <script>`, because inside a compiled OpenCode that executable is the
 opencode CLI, exactly as above — and a cross-process lock in the venv's parent directory keeps the service and

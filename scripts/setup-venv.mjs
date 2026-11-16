@@ -152,7 +152,8 @@ async function systemPythons() {
 /**
  * The optional packages the venv should carry but does not: the COM extras, and the local skill packages
  * this machine actually has (localSkillPackages). Neither kind is fatal -- the evaluator boots without
- * them -- so each is installed once, read back, and reported with the exact command if it still will not
+ * them -- so each is installed and read back, skill packages editable first (they are under development
+ * here) with a plain copy only as the fallback, and reported with the exact command if it still will not
  * import. This runs on the "ready" path too, which is what carries a skill added after the venv was built
  * into the venv; without it the next session pays for a ModuleNotFoundError and has to re-derive the
  * install command the builder would have known.
@@ -165,20 +166,35 @@ async function repairExtras(py, uv, warn, log, opts = {}, env = process.env) {
 	if (wanted.length === 0) return;
 	const gone = await missingModules(py, wanted.map((w) => w.imported));
 	for (const w of wanted.filter((x) => gone.includes(x.imported))) {
-		const spec = w.dir ? ["--editable", w.dir] : [w.pip];
+		// A skill package is under development on this machine, so editable first: an edit to the skill then
+		// lands in the venv with no reinstall. A plain directory copy runs ONLY as the fallback when the
+		// editable form itself fails (a build backend without PEP 660 support, a wedged .pth), and the log
+		// line then says the truth: from a copy, skill edits do nothing until a reinstall.
+		const forms = w.dir
+			? [
+					{ spec: ["--editable", w.dir], how: `editable from ${w.dir}` },
+					{ spec: [w.dir], how: `a copy of ${w.dir} - skill edits will NOT take effect until it is reinstalled` },
+				]
+			: [{ spec: [w.pip], how: null }];
 		const manual = `${uv ? `uv pip install --python "${py}" ` : `"${py}" -m pip install `}${w.dir ? `--editable "${w.dir}"` : w.pip}`;
-		try {
-			const r = uv
-				? await run("uv", ["pip", "install", "--python", py, ...spec], { timeoutMs: stepMs(opts), quiet: opts.quiet })
-				: await run(py, ["-m", "pip", "install", ...spec], { timeoutMs: stepMs(opts), quiet: opts.quiet });
-			if (r.ok && (await missingModules(py, [w.imported])).length === 0) {
-				log(`added ${w.imported} to the venv${w.dir ? ` (editable from ${w.dir})` : ""}.`);
-			} else {
-				warn(`${w.imported} is still not importable next to ${py}; work that needs it will not load. add it with: ${manual}`);
+		let landed = null;
+		let lastError = null;
+		for (const f of forms) {
+			try {
+				const r = uv
+					? await run("uv", ["pip", "install", "--python", py, ...f.spec], { timeoutMs: stepMs(opts), quiet: opts.quiet })
+					: await run(py, ["-m", "pip", "install", ...f.spec], { timeoutMs: stepMs(opts), quiet: opts.quiet });
+				if (r.ok && (await missingModules(py, [w.imported])).length === 0) {
+					landed = f.how;
+					break;
+				}
+				lastError = r.timedOut ? "timed out" : `exit ${r.status ?? r.signal}`;
+			} catch (error) {
+				lastError = `${error?.message ?? error}`;
 			}
-		} catch (error) {
-			warn(`could not install ${w.imported} (${error?.message ?? error}); add it with: ${manual}`);
 		}
+		if (landed !== null) log(`added ${w.imported} to the venv${landed ? ` (${landed})` : ""}.`);
+		else warn(`${w.imported} is still not importable next to ${py} (${lastError}); work that needs it will not load. add it with: ${manual}`);
 	}
 }
 
