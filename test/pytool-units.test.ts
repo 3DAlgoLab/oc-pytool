@@ -58,6 +58,8 @@ describe("output caps", () => {
 		expect(out).toContain("truncated at 4 chars");
 		// dropped counts everything lost, including what an earlier frame already overflowed
 		expect(out).toContain("12 dropped");
+		// and it names the knob that lifts the cap, so the model is not left guessing what to change
+		expect(out).toContain("maxOutputChars");
 	});
 
 	test("an uncapped channel is returned untouched", () => {
@@ -250,6 +252,8 @@ describe("model-facing text", () => {
 		expect(text).toContain("python: /venv/bin/python3 (managed-venv)");
 		expect(text).toContain("2 names: app, df");
 		expect(text).toContain("no snapshots");
+		// the cap is the value in force, and the line says where it comes from
+		expect(text).toContain(`output cap: ${DEFAULT_MAX_OUTPUT_CHARS} chars per channel (PYTOOL_MAX_OUTPUT_CHARS`);
 		// Windows-style tree: a launcher distinct from the bridge names the one kill that clears the chain
 		const win = formatDiagnostics({ enginePresent: true, pid: 100, bridgePid: 101, maxOutputChars: 1, namespaceNames: [] });
 		expect(win).toContain("taskkill /PID 100 /T /F");

@@ -125,7 +125,7 @@ cell waits on a boot that already started.
 | `PYTOOL_BOOTSTRAP_SCRIPT` | replace the venv builder — the tests point it at a fake, an operator can point it at a wrapper that owns interpreters |
 | `PYTOOL_TIMEOUT_MS` | silence watchdog: interrupt a cell after this long with no output; `0` (off) by default |
 | `PYTOOL_ABORT_GRACE_MS` | how long an aborted cell gets before the kernel is reaped (`5000`) |
-| `PYTOOL_MAX_OUTPUT_CHARS` | per-cell output cap, `46080`; `4096` per line, cuts marked. One call can override it with `maxOutputChars` |
+| `PYTOOL_MAX_OUTPUT_CHARS` | per-cell output cap, built-in default `46080`; `4096` per line, cuts marked. One call can override it with `maxOutputChars`, and `status=true` reports the value in force |
 | `PYTOOL_CELL_TIMEOUT_MS` | wall clock each cell gets when the caller named none; `0` (off) by default. One call overrides it with `timeoutMs` |
 | `PYTOOL_BOOT_TIMEOUT_MS` | deadline for a kernel that boots but never answers (`90000`) |
 | `PYTOOL_SHELL_PY` | how hard pytool pushes back when Python is routed through `bash`: `warn` (default) appends one notice to the offending result, at most 3 per session; `block` refuses such a call outright; `off` says nothing |

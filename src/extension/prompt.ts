@@ -14,7 +14,9 @@ export const pytoolToolDescription =
 	"through bash costs a cold interpreter and discards every name the next cell would reuse, and Code Mode " +
 	"runs JavaScript, not Python. A cell that raises keeps the kernel and its namespace. A cell that ignores " +
 	"an interrupt gets its kernel killed, which empties the namespace and is reported as KernelReaped. Output " +
-	`is capped at ${DEFAULT_MAX_OUTPUT_CHARS} chars with an explicit marker. ` +
+	"per channel is capped, and the cut is marked with what fell off; the built-in default is " +
+	`${DEFAULT_MAX_OUTPUT_CHARS} chars, PYTOOL_MAX_OUTPUT_CHARS overrides it per session, and status=true ` +
+	"reports the cap in force. " +
 	"The kernel runs on one interpreter per machine (a managed venv unless pinned), so a cell that fails on a " +
 	"missing import names that interpreter and prints the exact command that installs into it.";
 

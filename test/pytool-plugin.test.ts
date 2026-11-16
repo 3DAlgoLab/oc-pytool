@@ -5,6 +5,7 @@
 // The kernel behaviour behind them is gate 2 (pytool-integration.test.ts).
 
 import { describe, expect, test } from "bun:test";
+import { DEFAULT_MAX_OUTPUT_CHARS } from "../src/engine/engine.js";
 import plugin from "../src/index.js";
 
 type Hook = (event: any) => Promise<void> | void;
@@ -76,6 +77,20 @@ describe("the registered tool", () => {
 		expect(Object.keys(tool.input.properties)).toEqual(["code", "maxOutputChars", "timeoutMs", "status"]);
 		expect(tool.description).toContain("stays alive for the whole session");
 		expect(tool.description).toContain("COM");
+	});
+
+	test("the cap it states is a built-in default, not a claim about this session", async () => {
+		// the cap in force is resolved per kernel from PYTOOL_MAX_OUTPUT_CHARS (engine.ts), while the schema
+		// and the description are built once at plugin load -- so any number they carry is only honest when
+		// it is labelled as the built-in default and points at where the live value is reported.
+		const h = await load({ PYTOOL_SHELL_PY: "off", PYTOOL_MAX_OUTPUT_CHARS: "9000" });
+		const cap: string = h.tools[0].input.properties.maxOutputChars.description;
+		expect(cap).toContain(String(DEFAULT_MAX_OUTPUT_CHARS));
+		expect(cap).toContain("PYTOOL_MAX_OUTPUT_CHARS");
+		expect(cap).toContain("status=true");
+		expect(cap).not.toMatch(/session default is \d/);
+		expect(h.tools[0].description).toContain("built-in default");
+		expect(h.tools[0].description).toContain("status=true");
 	});
 
 	test("an empty cell answers instead of booting a kernel", async () => {

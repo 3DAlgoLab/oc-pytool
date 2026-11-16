@@ -85,8 +85,8 @@ function installProcessCleanupOnce(): void {
  * Cap one output channel, and name what the cut cost.
  *
  * The marker is written for the model that has to keep working after it: the cap, the size of what fell
- * off, and the two ways to get that text back. A bare "...truncated..." says something was lost without
- * saying whether the answer is to print a slice, page through it, or read a file.
+ * off, and the ways to get that text back. A bare "...truncated..." says something was lost without
+ * saying whether the answer is to print a slice, page through it, read a file, or raise the cap.
  */
 export function truncateWithMarker(text: string, maxChars: number, wasTruncated: boolean, dropped = 0): string {
 	const hidden = dropped + Math.max(0, text.length - maxChars);
@@ -94,7 +94,7 @@ export function truncateWithMarker(text: string, maxChars: number, wasTruncated:
 	return (
 		`${text.slice(0, maxChars)}\n` +
 		`[... output truncated at ${maxChars} chars, ${hidden} dropped - print the slice you need, ` +
-		"or write it to a file and read it back ...]"
+		"write it to a file and read it back, or raise maxOutputChars on the next call ...]"
 	);
 }
 

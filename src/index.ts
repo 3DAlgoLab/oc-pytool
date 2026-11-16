@@ -43,7 +43,7 @@ const pytoolInput = {
 			type: "integer",
 			minimum: 512,
 			description:
-				"Optional cap on characters returned per channel. Set it lower when the caller has its own output budget shared across nested results; the session default is 46080 and can be changed with PYTOOL_MAX_OUTPUT_CHARS.",
+				`Optional cap on characters returned per channel. Set it lower when the caller has its own output budget shared across nested results. The built-in default is ${DEFAULT_MAX_OUTPUT_CHARS} and PYTOOL_MAX_OUTPUT_CHARS overrides it per session; status=true reports the cap actually in force.`,
 		},
 		timeoutMs: {
 			type: "integer",
@@ -54,7 +54,7 @@ const pytoolInput = {
 		status: {
 			type: "boolean",
 			description:
-				"Set true to return kernel diagnostics instead of running code: interpreter, process ids, output cap and the names currently in the namespace.",
+				"Set true to return kernel diagnostics instead of running code: interpreter, process ids, the output cap in force, and the names currently in the namespace.",
 		},
 	},
 	required: ["code"],

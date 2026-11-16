@@ -62,7 +62,7 @@ export function formatDiagnostics(v: DiagnosticsView): string {
 		lines.push(`generation: ${v.kernelGenerations} (the namespace was rebuilt${v.kernelDeathReason ? `: ${v.kernelDeathReason}` : ""})`);
 	}
 	lines.push(`python: ${v.interpreter ?? "unresolved"}${v.interpreterSource ? ` (${v.interpreterSource})` : ""}`);
-	lines.push(`output cap: ${v.maxOutputChars} chars per channel`);
+	lines.push(`output cap: ${v.maxOutputChars} chars per channel (PYTOOL_MAX_OUTPUT_CHARS sets it; one call can override with maxOutputChars)`);
 	lines.push(`namespace: ${namespaceSuffix(v.namespaceNames)}`);
 	lines.push("no snapshots: a rebuilt kernel starts empty");
 	return lines.join("\n");
