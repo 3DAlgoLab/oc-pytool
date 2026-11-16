@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 /**
- * postinstall: build (or repair in place) the managed interpreter environment the bridge boots in.
+ * Build (or repair in place) the managed interpreter environment the bridge boots in.
+ *
+ * It runs twice: as this script (`npm run setup-venv`), and imported by the plugin, which builds the venv on
+ * the first boot that needs one (src/engine/venv-bootstrap.ts). There is deliberately no install-time lifecycle
+ * script in package.json: a `prepare`/`postinstall` hook makes the package manager *prepare* a git dependency,
+ * and the npm embedded in OpenCode's compiled binary prepares it by re-launching its own `process.execPath`
+ * with `B:\~BUN\bin\npm-cli.js` -- that is the opencode CLI, so the install dies on "Unrecognized flag:
+ * --force in command opencode" and the plugin never loads.
+ *
+ * So the library form must not kill its host: no process.exit, no synchronous spawn. Only running this file
+ * directly sets an exit code and prints as a CLI.
  *
  * Location: $XDG_DATA_HOME/opencode/pytool/venv, else ~/.local/share/opencode/pytool/venv -- OpenCode's
- * own data directory on every platform, so a plugin install that never runs this script still finds the
- * venv in the place the runtime looks (src/engine/python-locate.ts applies the identical rule; keep the
- * two in step, a venv built with one layout and resolved with the other is a dead evaluator hiding
- * behind a healthy-looking install log). PYTOOL_VENV moves it for machines that want it elsewhere.
+ * own data directory on every platform, so a plugin install that never builds anything still finds the venv in
+ * the place the runtime looks (src/engine/python-locate.ts applies the identical rule; keep the two in step, a
+ * venv built with one layout and resolved with the other is a dead evaluator hiding behind a healthy-looking
+ * install log). PYTOOL_VENV moves it for machines that want it elsewhere.
  *
  * The interpreter lives in Scripts/ on Windows and bin/ elsewhere.
  *
@@ -16,23 +26,27 @@
  * by reflex, and a failure there costs it several calls to find its way back to uv.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const WIN = process.platform === "win32";
 
-function managedVenvDir() {
-	if (process.env.PYTOOL_VENV) return process.env.PYTOOL_VENV;
-	const data = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+/** Duplicated in src/engine/python-locate.ts on purpose: this file must stay runnable by a bare `node`. */
+export function managedVenvDir(env = process.env, home = homedir()) {
+	if (env.PYTOOL_VENV) return env.PYTOOL_VENV;
+	const data = env.XDG_DATA_HOME || join(home, ".local", "share");
 	return join(data, "opencode", "pytool", "venv");
 }
 
-const VENV_DIR = managedVenvDir();
-const PY = join(VENV_DIR, WIN ? "Scripts" : "bin", WIN ? "python.exe" : "python3");
+export function managedVenvPython(env = process.env, platform = process.platform, home = homedir()) {
+	return join(managedVenvDir(env, home), platform === "win32" ? "Scripts" : "bin", platform === "win32" ? "python.exe" : "python3");
+}
+
 // What bridge.py needs in order to boot -- probed as importable *module* names, never pip names.
-const CORE_MODULES = ["ipykernel", "jupyter_client"];
+export const CORE_MODULES = ["ipykernel", "jupyter_client"];
 // [pip name, import name]: pywin32 installs win32com/win32api/pythoncom and there is no "pywin32"
 // module, so probing the pip name would call a healthy install broken. It is the whole point of this
 // tool on Windows (COM: DraftSight, Excel, AutoCAD, serial ports); its absence is a warning, not a
@@ -40,68 +54,87 @@ const CORE_MODULES = ["ipykernel", "jupyter_client"];
 const EXTRA_PACKAGES = WIN ? [["pywin32", "win32com"]] : [];
 const INSTALL_PACKAGES = [...CORE_MODULES, ...EXTRA_PACKAGES.map(([pip]) => pip)];
 
-function log(m) {
-	process.stdout.write(`[pytool] ${m}\n`);
-}
-function warn(m) {
-	process.stderr.write(`[pytool] warning: ${m}\n`);
-}
-function fail(m) {
-	process.stderr.write(`[pytool] ERROR: ${m}\n`);
-	process.exit(1);
-}
+/** Wall clock one step gets; a hung installer must not sit on the session forever. */
+const STEP_TIMEOUT_MS = 900_000;
 
-/** Run one program with argv, never through a shell. */
-function run(program, args, { inherit = true, timeoutMs = 900_000 } = {}) {
-	const r = spawnSync(program, args, {
-		stdio: inherit ? "inherit" : "ignore",
-		encoding: "utf8",
-		timeout: timeoutMs,
-		windowsHide: true,
+/** A step's budget, or the default when the caller named none. */
+const stepMs = (opts) => (opts.stepTimeoutMs > 0 ? opts.stepTimeoutMs : STEP_TIMEOUT_MS);
+
+/**
+ * Run one program with argv, never through a shell, never synchronously: the library form runs inside the
+ * OpenCode server, and a spawnSync there freezes every other session in the process.
+ */
+function run(program, args, { quiet = false, timeoutMs = STEP_TIMEOUT_MS } = {}) {
+	return new Promise((res, rej) => {
+		let stdout = "";
+		let stderr = "";
+		let timedOut = false;
+		let child;
+		try {
+			child = spawn(program, args, { stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit", windowsHide: true });
+		} catch (error) {
+			rej(new Error(`${program} failed to start: ${error?.message ?? error}`));
+			return;
+		}
+		child.stdout?.on("data", (b) => (stdout += b));
+		child.stderr?.on("data", (b) => (stderr += b));
+		const timer = setTimeout(() => {
+			timedOut = true;
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+		}, timeoutMs);
+		timer.unref?.();
+		child.on("error", (error) => {
+			clearTimeout(timer);
+			rej(new Error(`${program} failed to start: ${error?.message ?? error}`));
+		});
+		child.on("close", (status, signal) => {
+			clearTimeout(timer);
+			res({ status, signal, stdout, stderr, timedOut, ok: status === 0 && !timedOut });
+		});
 	});
-	if (r.error) throw new Error(`${program} failed to start: ${r.error.message}`);
-	return r;
 }
 
 /**
  * Ask an interpreter which runtime deps it can host. find_spec never executes package code, so probing
  * an environment we do not own is safe.
  */
-function missingModules(python, modules, prefixArgs = []) {
+async function missingModules(python, modules, prefixArgs = []) {
 	const probe = [
 		"import importlib.util as u",
 		`print('DEPS ' + ','.join(n for n in ${JSON.stringify(modules)} if u.find_spec(n) is not None))`,
 	].join("; ");
-	const r = spawnSync(python, [...prefixArgs, "-c", probe], { encoding: "utf8", timeout: 60_000, windowsHide: true });
+	const r = await run(python, [...prefixArgs, "-c", probe], { quiet: true, timeoutMs: 60_000 });
 	const line = /^DEPS (.*)$/m.exec(`${r.stdout ?? ""}`)?.[1]?.trim() ?? "";
 	const present = line ? line.split(",").filter(Boolean) : [];
 	return modules.filter((d) => !present.includes(d));
 }
 
-function hasUv() {
+async function hasUv() {
 	try {
-		return run("uv", ["--version"], { inherit: false }).status === 0;
+		return (await run("uv", ["--version"], { quiet: true, timeoutMs: 30_000 })).ok;
 	} catch {
 		return false;
 	}
 }
 
 /** Interpreters that could host a venv build, most likely first. */
-function systemPythons() {
+async function systemPythons() {
 	const candidates = WIN
 		? [["python", []], ["python3", []], ["py", ["-3"]]]
 		: [["python3", []], ["python", []]];
 	for (const [program, prefix] of candidates) {
 		try {
-			if (run(program, [...prefix, "--version"], { inherit: false }).status === 0) return [program, prefix];
+			if ((await run(program, [...prefix, "--version"], { quiet: true, timeoutMs: 30_000 })).ok) return [program, prefix];
 		} catch {}
 	}
 	return null;
 }
 
 /** An optional package that failed to land is worth reporting, but must not fail the whole install. */
-function reportExtras() {
-	const missing = missingModules(PY, EXTRA_PACKAGES.map(([, imported]) => imported));
+async function reportExtras(py, warn) {
+	const missing = await missingModules(py, EXTRA_PACKAGES.map(([, imported]) => imported));
 	if (missing.length === 0) return;
 	const names = EXTRA_PACKAGES.filter(([, imported]) => missing.includes(imported)).map(([pip]) => pip);
 	warn(`installed but not importable: ${names.join(", ")} - COM work will not load.`);
@@ -115,116 +148,180 @@ function reportExtras() {
  * interpreter -- which is where packages end up installed somewhere the kernel never runs. Failure here is a
  * warning, not a dead install: the evaluator works without pip, and pytool's import hint prints the uv form.
  */
-function ensurePip(uv) {
-	if (missingModules(PY, ["pip"]).length === 0) return;
+async function ensurePip(py, uv, warn, log, opts = {}) {
+	if ((await missingModules(py, ["pip"])).length === 0) return;
 	try {
-		if (uv) run("uv", ["pip", "install", "--python", PY, "pip"]);
-		else run(PY, ["-m", "ensurepip", "--upgrade"]);
+		if (uv) await run("uv", ["pip", "install", "--python", py], { timeoutMs: stepMs(opts), quiet: opts.quiet });
+		else await run(py, ["-m", "ensurepip", "--upgrade"], { timeoutMs: stepMs(opts), quiet: opts.quiet });
 	} catch (error) {
-		warn(`could not add pip to the venv (${error?.message ?? error}); install packages with uv against ${PY}.`);
+		warn(`could not add pip to the venv (${error?.message ?? error}); install packages with uv against ${py}.`);
 		return;
 	}
-	if (missingModules(PY, ["pip"]).length > 0) {
-		warn(`pip is still not importable in ${VENV_DIR}; install packages with uv against ${PY}.`);
+	if ((await missingModules(py, ["pip"])).length > 0) {
+		warn(`pip is still not importable next to ${py}; install packages with uv against it.`);
 		return;
 	}
 	log("added pip to the venv.");
 }
 
-/** Say how to add a package later, in the form that targets this interpreter rather than PATH python. */
-function logAddPackages(uv) {
-	const cmd = uv ? `uv pip install --python "${PY}" <pkg>` : `"${PY}" -m pip install <pkg>`;
-	log(`add packages with: ${cmd}`);
+function addPackagesHint(uv, py) {
+	return uv ? `uv pip install --python "${py}" <pkg>` : `"${py}" -m pip install <pkg>`;
 }
 
-function installDeps(uv) {
+async function installDeps(py, uv, opts = {}) {
 	if (uv) {
-		run("uv", ["pip", "install", "--python", PY, ...INSTALL_PACKAGES]);
+		await run("uv", ["pip", "install", "--python", py, ...INSTALL_PACKAGES], { timeoutMs: stepMs(opts), quiet: opts.quiet });
 		return;
 	}
-	run(PY, ["-m", "pip", "install", "--upgrade", "pip"]);
-	run(PY, ["-m", "pip", "install", ...INSTALL_PACKAGES]);
+	await run(py, ["-m", "pip", "install", "--upgrade", "pip"], { timeoutMs: stepMs(opts), quiet: opts.quiet });
+	await run(py, ["-m", "pip", "install", ...INSTALL_PACKAGES], { timeoutMs: stepMs(opts), quiet: opts.quiet });
 }
 
 /** Create the venv; uv owns most agent venvs and creates them without pip. */
-function createVenv(system, prefix, uv) {
-	mkdirSync(join(VENV_DIR, ".."), { recursive: true });
+async function createVenv(venvDir, system, prefix, uv, opts = {}) {
+	mkdirSync(join(venvDir, ".."), { recursive: true });
 	if (uv) {
 		// --seed puts pip in the venv: without it an agent mid-session cannot install the one package it needs
 		// unless it already knows this venv was built by uv
-		run("uv", ["venv", "--seed", "--python", system, ...prefix, VENV_DIR]);
+		await run("uv", ["venv", "--seed", "--python", system, ...prefix, venvDir], { timeoutMs: stepMs(opts), quiet: opts.quiet });
 		return;
 	}
 	// --clear: a half-built venv must not leak into a "working" one
-	run(system, [...prefix, "-m", "venv", "--clear", VENV_DIR]);
+	await run(system, [...prefix, "-m", "venv", "--clear", venvDir], { timeoutMs: stepMs(opts), quiet: opts.quiet });
 }
 
-function main() {
-	if (process.env.PYTOOL_SKIP_VENV === "1") {
+/**
+ * The whole job, as a value. Never exits the process and never throws for an expected failure: the caller
+ * decides what a failure costs, and the plugin's caller is a live OpenCode server.
+ *
+ * status: "ready" (already fine) | "repaired" (deps added to an existing venv) | "created" (new venv)
+ *       | "skipped" (PYTOOL_SKIP_VENV=1) | "failed" (detail says why)
+ */
+export async function setupManagedVenv(options = {}) {
+	const env = options.env ?? process.env;
+	const quiet = options.quiet === true;
+	const startedAt = Date.now();
+	const deadlineAt = startedAt + (options.timeoutMs ?? STEP_TIMEOUT_MS);
+	// one install step's budget: a plugin boot must not sit behind a 15-minute hung uv run, so the caller's
+	// timeout also caps each step, and `outOfTime` stops the job between steps. `step` is the pair of knobs
+	// every child process inherits: the budget, and whether its noise goes to the console or into `log`.
+	const step = {
+		stepTimeoutMs: options.stepTimeoutMs > 0 ? Math.min(options.stepTimeoutMs, STEP_TIMEOUT_MS) : STEP_TIMEOUT_MS,
+		quiet: options.quiet === true,
+	};
+	const venvDir = managedVenvDir(env);
+	const py = join(venvDir, WIN ? "Scripts" : "bin", WIN ? "python.exe" : "python3");
+
+	const lines = [];
+	const log = (m) => {
+		lines.push(`[pytool] ${m}`);
+		if (!quiet) process.stdout.write(`[pytool] ${m}\n`);
+	};
+	const warn = (m) => {
+		lines.push(`[pytool] warning: ${m}`);
+		if (!quiet) process.stderr.write(`[pytool] warning: ${m}\n`);
+	};
+	const done = (status, extra = {}) => ({
+		status,
+		venvDir,
+		python: py,
+		log: lines.join("\n"),
+		tookMs: Date.now() - startedAt,
+		...extra,
+	});
+	/** A build that runs past its budget stops between steps rather than owning the session. */
+	const outOfTime = () =>
+		Date.now() > deadlineAt
+			? done("failed", {
+					detail: `stopped after ${Math.round((Date.now() - startedAt) / 1000)}s without a usable venv; run 'npm run setup-venv' (or a longer PYTOOL_VENV_TIMEOUT_MS) once the network is back.`,
+					timedOut: true,
+				})
+			: null;
+
+	if (env.PYTOOL_SKIP_VENV === "1") {
 		warn("PYTOOL_SKIP_VENV=1: the evaluator venv was not built; pytool fails until one exists.");
-		return;
+		return done("skipped");
 	}
 
-	const uv = hasUv();
+	const uv = await hasUv();
 
 	// an existing venv that can host every dep is the common case -- never rebuild it, apart from pip
-	const missing = existsSync(PY) ? missingModules(PY, CORE_MODULES) : null;
+	const missing = existsSync(py) ? await missingModules(py, CORE_MODULES) : null;
 	if (missing && missing.length === 0) {
-		ensurePip(uv);
-		log(`venv ready (${INSTALL_PACKAGES.join(", ")}) at ${VENV_DIR}`);
-		logAddPackages(uv);
-		return;
+		await ensurePip(py, uv, warn, log, step);
+		log(`venv ready (${INSTALL_PACKAGES.join(", ")}) at ${venvDir}`);
+		log(`add packages with: ${addPackagesHint(uv, py)}`);
+		return done("ready");
 	}
 
 	if (missing && missing.length > 0) {
-		log(`repairing evaluator venv at ${VENV_DIR} (missing ${missing.join(", ")})...`);
+		log(`repairing evaluator venv at ${venvDir} (missing ${missing.join(", ")})...`);
 		try {
-			installDeps(uv);
+			await installDeps(py, uv, step);
 		} catch (error) {
-			fail(`could not repair the evaluator venv (${error?.message ?? error}).`);
+			return done("failed", { detail: `could not repair the evaluator venv (${error?.message ?? error}).` });
 		}
-		const still = missingModules(PY, CORE_MODULES);
-		if (still.length > 0) fail(`deps still not importable after install: ${still.join(", ")} - the evaluator won't start.`);
-		reportExtras();
-		ensurePip(uv);
+		const still = await missingModules(py, CORE_MODULES);
+		if (still.length > 0)
+			return done("failed", { detail: `deps still not importable after install: ${still.join(", ")} - the evaluator won't start.` });
+		await reportExtras(py, warn);
+		await ensurePip(py, uv, warn, log, step);
 		log("done. pytool will use this venv.");
-		logAddPackages(uv);
-		return;
+		log(`add packages with: ${addPackagesHint(uv, py)}`);
+		return done("repaired");
 	}
 
-	const system = systemPythons();
+	const late = outOfTime();
+	if (late) return late;
+
+	const system = await systemPythons();
 	if (!system) {
-		fail(
-			`no usable python found on PATH; could not create the evaluator venv at ${VENV_DIR}. ` +
-				`Install Python 3.11+ (or set PYTOOL_SKIP_VENV=1 to defer) and re-run 'node scripts/setup-venv.mjs'.`,
-		);
-		return;
+		return done("failed", {
+			detail:
+				`no usable python found on PATH; could not create the evaluator venv at ${venvDir}. ` +
+				`Install Python 3.11+ (or set PYTOOL_SKIP_VENV=1 to defer) and re-run 'npm run setup-venv'.`,
+		});
 	}
 	log(
-		`building evaluator venv at ${VENV_DIR} (from ${system[0]}${system[1].length ? " " + system[1].join(" ") : ""}${
+		`building evaluator venv at ${venvDir} (from ${system[0]}${system[1].length ? " " + system[1].join(" ") : ""}${
 			uv ? ", via uv" : ""
 		})...`,
 	);
 	try {
-		createVenv(system[0], system[1], uv);
-		if (!existsSync(PY)) {
-			fail(`a venv was created but no interpreter sits where the runtime looks for it: ${PY}`);
-			return;
+		await createVenv(venvDir, system[0], system[1], uv, step);
+		if (!existsSync(py)) {
+			return done("failed", { detail: `a venv was created but no interpreter sits where the runtime looks for it: ${py}` });
 		}
-		installDeps(uv);
-		const still = missingModules(PY, CORE_MODULES);
-		if (still.length > 0) {
-			fail(`runtime deps still not importable after install: ${still.join(", ")} - the evaluator won't start.`);
-			return;
-		}
-		reportExtras();
-		ensurePip(uv);
+		const late2 = outOfTime();
+		if (late2) return late2;
+		await installDeps(py, uv, step);
+		const still = await missingModules(py, CORE_MODULES);
+		if (still.length > 0)
+			return done("failed", { detail: `runtime deps still not importable after install: ${still.join(", ")} - the evaluator won't start.` });
+		await reportExtras(py, warn);
+		await ensurePip(py, uv, warn, log, step);
 		log(`done. pytool will use this venv (${INSTALL_PACKAGES.join(", ")}).`);
-		logAddPackages(uv);
+		log(`add packages with: ${addPackagesHint(uv, py)}`);
+		return done("created");
 	} catch (error) {
-		// a real failure must exit non-zero -- never hand the user a dead evaluator
-		fail(`could not build the evaluator venv (${error?.message ?? error}).`);
+		// a real failure is reported, never swallowed -- but only the CLI may set an exit code
+		return done("failed", { detail: `could not build the evaluator venv (${error?.message ?? error}).` });
 	}
 }
 
-main();
+/** CLI entry: print what happened, exit non-zero on a dead install. */
+async function main() {
+	const r = await setupManagedVenv();
+	// machine-readable: the plugin runs this as a child (src/engine/venv-bootstrap.ts) and maps this line
+	// back onto its own status, so the venv's health is decided in exactly one place.
+	process.stdout.write(`[pytool] status=${r.status}\n`);
+	if (r.status === "failed") {
+		process.stderr.write(`[pytool] ERROR: ${r.detail}\n`);
+		process.exitCode = 1;
+	}
+}
+
+// --- only a direct run owns the process; an import must not exit or block the host that imported it ---
+const invokedDirectly =
+	typeof process.argv[1] === "string" && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+if (invokedDirectly) void main();

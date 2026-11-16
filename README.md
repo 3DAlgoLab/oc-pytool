@@ -59,8 +59,34 @@ what works on POSIX hosts.
 A local plugin directory needs `package.json` `name` + `exports`, which this package has; OpenCode loads the
 server part from `exports["."]`. Restart the server (`opencode service restart`) after the first install.
 
-The kernel needs a Python with `ipykernel` + `jupyter_client`. `npm install` builds it in `postinstall`, or run
-it directly:
+### Installing from git
+
+`"plugins": ["github:owner/oc-pytool#main"]` (or `opencode plugin add github:owner/oc-pytool`) works, and this
+package deliberately has **no install-time lifecycle script** to make that route fail. Measured on OpenCode
+2.3.0 for Windows: a `prepare`/`postinstall` hook makes npm *prepare* the git checkout, and the npm inside the
+compiled binary prepares it by re-launching its own executable with `B:\~BUN\bin\npm-cli.js` — which is the
+opencode CLI, so it parses those npm flags as its own:
+
+```
+opencode.exe "B:\~BUN\bin\npm-cli.js" install --force --cache=... --no-dry-run
+ERRORS
+  Unrecognized flag: --force in command opencode
+```
+
+That surfaces as `git dep preparation failed` → `NpmInstallFailedError` → "Plugin failed to load", retried on
+every config reload. Without a lifecycle script there is no preparation step to trip over. (`npm install` of a
+git URL *without* scripts, and `bun install github:owner/repo`, both succeed on the same machine — the failure
+is specific to the prepared path.)
+
+A plugin loaded from a local path or `file:///` URL is skipped by `opencode plugin check/update`: updates come
+from `git pull` in that directory.
+
+### The evaluator interpreter
+
+The kernel needs a Python with `ipykernel` + `jupyter_client`. Nothing builds it during install: the plugin
+builds it lazily, on the first kernel boot that needs one, through the same code and the same path rules as the
+script. A fresh machine therefore pays for it on its first cell — `PYTOOL_VENV_BOOTSTRAP_MS` (`120000`) is that
+budget — or builds it up front:
 
 ```bash
 npm run setup-venv           # node scripts/setup-venv.mjs
@@ -70,7 +96,10 @@ It builds at `$XDG_DATA_HOME/opencode/pytool/venv`, else `~/.local/share/opencod
 machine, not one per project, because the kernel is one interpreter for the whole agent. `uv` when present,
 `pip` otherwise, seeded with `pip`, and `pywin32` on Windows (which is what puts `win32com` in reach).
 If `python3` or the network is missing it says so plainly instead of half-building. `PYTOOL_VENV` moves it;
-`PYTOOL_SKIP_VENV=1` defers the build.
+`PYTOOL_SKIP_VENV=1` defers the build. The builder runs in-process as a module (`src/engine/venv-bootstrap.ts`
+imports it) — never as `process.execPath <script>`, because inside a compiled OpenCode that executable is the
+opencode CLI, exactly as above — and a cross-process lock in the venv's parent directory keeps the service and
+each CLI worker from building it twice at once.
 
 ## Use
 
@@ -91,6 +120,9 @@ cell waits on a boot that already started.
 | --- | --- |
 | `PYTOOL_PYTHON` | pin the interpreter, trusted without probing; the kernel exports the winner as `PYTOOL_PYTHON` for sibling skills |
 | `PYTOOL_VENV` | where the managed venv lives (build script and resolver read the same variable) |
+| `PYTOOL_VENV_BOOTSTRAP_MS` | budget for the lazy venv build that the first boot may trigger (`120000`); it also caps each install step, so a hung uv run cannot own the session |
+| `PYTOOL_SKIP_VENV` | `1` leaves the venv alone: a pinned or PATH interpreter has to carry the kernel |
+| `PYTOOL_BOOTSTRAP_SCRIPT` | replace the venv builder — the tests point it at a fake, an operator can point it at a wrapper that owns interpreters |
 | `PYTOOL_TIMEOUT_MS` | silence watchdog: interrupt a cell after this long with no output; `0` (off) by default |
 | `PYTOOL_ABORT_GRACE_MS` | how long an aborted cell gets before the kernel is reaped (`5000`) |
 | `PYTOOL_MAX_OUTPUT_CHARS` | per-cell output cap, `46080`; `4096` per line, cuts marked. One call can override it with `maxOutputChars` |
@@ -165,6 +197,7 @@ bridge.py               the Python side: jupyter_client + ipykernel, one JSON li
 src/index.ts            plugin wiring: one kernel per session, hooks, the tool, teardown
 src/engine/
   python-locate.ts      pin > managed venv > PATH, each non-pin probed for ipykernel/jupyter_client
+  venv-bootstrap.ts     build the managed venv on the boot that needs one: one lock, one verdict per process
   protocol.ts           the bridge's message shapes, both sides
   kernel.ts             spawn the bridge, route events by id, cap output, kill the process tree
   engine.ts             boot, cell queue, cell budget, abort grace, reset notice, teardown
@@ -177,9 +210,10 @@ src/extension/
   tool-result.ts        the result's metadata, and why it never carries an undefined value
 test/
   pytool-units.test.ts     gate 1a — no server, no kernel: routing, caps, ladder, budgets, model-facing text
+  venv-bootstrap.test.ts   gate 1a — the lazy venv build: once per process, one lock, a failure stays failed
   pytool-plugin.test.ts    gate 1b — a real plugin against a fake context: registration, guidance, pushback
   pytool-integration.test.ts gate 2 — a real ipykernel: persistence, abort, reap, caps, encoding
-scripts/setup-venv.mjs     the managed venv, uv-aware, platform-aware
+scripts/setup-venv.mjs     the managed venv: uv-aware, platform-aware, and imported by the plugin when a boot needs one
 ```
 
 Three processes matter, and more on Windows: a venv `python.exe` is a launcher stub that re-execs, so a live

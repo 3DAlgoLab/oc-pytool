@@ -2,6 +2,7 @@
 // --- teardown. The wire lives in kernel.ts. There is no namespace snapshot on purpose: see README.
 
 import { formatPythonFailure, type PythonResolution, type PythonSource, resolvePython } from "./python-locate.js";
+import { ensureManagedVenv } from "./venv-bootstrap.js";
 import { KernelClient } from "./kernel.js";
 
 export { formatPythonFailure, managedVenvDir, pythonCandidates, resolvePython } from "./python-locate.js";
@@ -288,13 +289,24 @@ export class KernelManager {
 
 	private async doStart(): Promise<void> {
 		this.state = "starting";
+		// --- the managed venv is built here, on the boot that first needs one, never by an install-time
+		// --- lifecycle script: a `postinstall`/`prepare` hook makes npm *prepare* a git dependency, and the
+		// --- npm embedded in OpenCode's compiled binary prepares it by re-launching its own executable with
+		// --- B:\~BUN\bin\npm-cli.js, which is the opencode CLI, so a `github:` plugin install would die in
+		// --- preparation and the plugin would never load. See README "Installing from git". ---
+		const bootstrap = await ensureManagedVenv();
 		// --- one interpreter answer for the whole machine (see python-locate.ts): a pin wins outright,
 		// --- everything else has to prove it can import the bridge's deps before it is trusted ---
 		const resolved = resolvePython();
 		this.python = resolved;
 		if (!resolved.ok) {
 			this.state = "idle";
-			throw new Error(formatPythonFailure(resolved));
+			const why = formatPythonFailure(resolved);
+			throw new Error(
+				bootstrap.status === "failed" || bootstrap.status === "skipped"
+					? `${why}\n  venv bootstrap: ${bootstrap.status}${bootstrap.detail ? ` (${bootstrap.detail})` : ""} - run 'npm run setup-venv' in the plugin directory.`
+					: why,
+			);
 		}
 		installProcessCleanupOnce();
 		liveManagers.add(this);

@@ -13,7 +13,6 @@
     "scripts"
   ],
   "scripts": {
-    "postinstall": "node scripts/setup-venv.mjs",
     "setup-venv": "node scripts/setup-venv.mjs",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
