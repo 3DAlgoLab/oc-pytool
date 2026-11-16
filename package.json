@@ -1,0 +1,29 @@
+{
+  "name": "oc-pytool",
+  "version": "0.1.0",
+  "description": "A session-persistent Python kernel tool for OpenCode: names, data and live COM handles survive between calls.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "bridge.py",
+    "scripts"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/setup-venv.mjs",
+    "setup-venv": "node scripts/setup-venv.mjs",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

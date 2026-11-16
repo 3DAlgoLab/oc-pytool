@@ -1,0 +1,4 @@
+# Matches pi-pytool. Without it, autocrlf on a Windows host checks every source file
+# out as CRLF, and the bridge reads cell source and stdout as bytes where the line
+# endings are a fact the protocol cares about, not an editor preference.
+* text=auto eol=lf

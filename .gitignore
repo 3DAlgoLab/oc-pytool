@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# the managed kernel venv lives at ~/.local/share/opencode/pytool/venv, not here;
+# PYTOOL_VENV can point it anywhere, and a stray in-tree venv must never be committed
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# probe and drive-harness scratch output
+*.log
+*.out
+.DS_Store
