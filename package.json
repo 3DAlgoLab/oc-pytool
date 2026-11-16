@@ -1,6 +1,6 @@
 {
   "name": "oc-pytool",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A session-persistent Python kernel tool for OpenCode: names, data and live COM handles survive between calls.",
   "type": "module",
   "license": "MIT",

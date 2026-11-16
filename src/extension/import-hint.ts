@@ -11,6 +11,9 @@
 // --- scripts/setup-venv.mjs already makes.
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Import name != pip name for the packages that actually get imported. Without this the hint tells the model
@@ -38,6 +41,20 @@ export const PIP_NAME_FOR_MODULE: Record<string, string> = {
 	docx: "python-docx",
 	defusedxml: "defusedxml",
 };
+
+/**
+ * Packages that are not on PyPI at all: they live as OpenCode skill packages in this machine's global
+ * skills directory, and the command that works installs them `--editable` from there. Naming a bare pip
+ * name for one of these is the one hint that can never succeed -- pip has no `draftsight`. The directory
+ * rule is duplicated from scripts/setup-venv.mjs on purpose (same reason as python-locate.ts: the builder
+ * must stay runnable by a bare `node`), and PYTOOL_DRAFTSIGHT_SKILL overrides it there and here.
+ */
+export function localPackageSource(moduleName: string, env: NodeJS.ProcessEnv = process.env, home = homedir()): string | undefined {
+	if (moduleName !== "draftsight") return undefined;
+	const dir =
+		env.PYTOOL_DRAFTSIGHT_SKILL || join(env.XDG_CONFIG_HOME || join(home, ".config"), "opencode", "skills", "draftsight-py");
+	return existsSync(dir) ? dir : undefined;
+}
 
 /** Only these raise for a package that is simply not installed. */
 const IMPORT_ERROR_NAMES = new Set(["ModuleNotFoundError", "ImportError"]);
@@ -94,21 +111,47 @@ function quote(path: string): string {
  * this tool exists to prevent, because the package then sits in an interpreter the kernel never runs and the
  * next cell fails the same way with a longer traceback.
  */
-export function installerCommand(interpreter: string, modules: string[], probe: InstallerProbe = {}): InstallerChoice {
-	return installerChoice(interpreter, modules, probe);
+export function installerCommand(
+	interpreter: string,
+	modules: string[],
+	probe: InstallerProbe = {},
+	localDirs?: Record<string, string | undefined>,
+): InstallerChoice {
+	return installerChoice(interpreter, modules, probe, localDirs);
 }
 
-/** The same decision with the probe supplied explicitly, so the hint can be tested without spawning anything. */
-export function installerChoice(interpreter: string, modules: string[], probe: InstallerProbe): InstallerChoice {
-	const packages = modules.map((m) => pipName(m)).join(" ");
-	if (probe.uv) {
-		return {
-			program: "uv",
-			command: `uv pip install --python ${quote(interpreter)} ${packages}`,
-			note: probe.pip ? undefined : 'this venv has no pip module, so "python -m pip install" cannot work here',
-		};
+/**
+ * The same decision with the probe supplied explicitly, so the hint can be tested without spawning anything.
+ * `localDirs` overrides the filesystem lookup per module, for the same reason the probe is injected.
+ */
+export function installerChoice(
+	interpreter: string,
+	modules: string[],
+	probe: InstallerProbe,
+	localDirs: Record<string, string | undefined> = {},
+): InstallerChoice {
+	// a local skill package contributes `--editable "<dir>"` where a PyPI package contributes its name;
+	// the argument order works for both uv and pip
+	const args: string[] = [];
+	const local: string[] = [];
+	for (const m of modules) {
+		const src = localDirs[m] ?? localPackageSource(m);
+		if (src !== undefined) {
+			if (!local.includes(m)) local.push(m);
+			const flag = `--editable ${quote(src)}`;
+			if (!args.includes(flag)) args.push(flag);
+		} else {
+			args.push(pipName(m));
+		}
 	}
-	return { program: "pip", command: `${quote(interpreter)} -m pip install ${packages}` };
+	const packages = args.join(" ");
+	const localNote =
+		local.length > 0 ? `${local.join(", ")} is a local skill package, not a PyPI name - installed editable from its skill directory` : undefined;
+	if (probe.uv) {
+		const notes = [probe.pip ? undefined : 'this venv has no pip module, so "python -m pip install" cannot work here', localNote].filter(Boolean);
+		return { program: "uv", command: `uv pip install --python ${quote(interpreter)} ${packages}`, note: notes.join("; ") || undefined };
+	}
+	return { program: "pip", command: `${quote(interpreter)} -m pip install ${packages}`, note: localNote };
 }
 
 /**
@@ -126,7 +169,16 @@ export function composeImportHint(modules: string[], interpreter: string | undef
 	const aliases = modules.filter((m) => pipName(m) !== m).map((m) => `${m} -> ${pipName(m)}`);
 	if (aliases.length > 0) lines.push(`       pip name differs from the import name: ${aliases.join(", ")}`);
 	if (install.note) lines.push(`       note: ${install.note}`);
-	lines.push("       run it through the shell tool, then re-run the cell: the kernel picks the package up without a restart.");
+	// Measured, not inferred: an editable install registers through a .pth read at interpreter startup, so a
+	// kernel that was already running when the install landed still raises ModuleNotFoundError on the next
+	// cell -- the exact dead end this line used to send the model into. An ordinary site-packages install
+	// IS picked up by a live interpreter, so only the editable form changes the advice.
+	if (install.command.includes("--editable")) {
+		lines.push("       an editable install lands in a .pth read at interpreter startup: the next kernel boot sees it;");
+		lines.push("       this running kernel needs the source tree on sys.path (insert it) to use it now.");
+	} else {
+		lines.push("       run it through the shell tool, then re-run the cell: the kernel picks the package up without a restart.");
+	}
 	return lines;
 }
 

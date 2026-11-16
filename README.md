@@ -94,8 +94,12 @@ npm run setup-venv           # node scripts/setup-venv.mjs
 
 It builds at `$XDG_DATA_HOME/opencode/pytool/venv`, else `~/.local/share/opencode/pytool/venv` — one venv per
 machine, not one per project, because the kernel is one interpreter for the whole agent. `uv` when present,
-`pip` otherwise, seeded with `pip`, and `pywin32` on Windows (which is what puts `win32com` in reach).
-If `python3` or the network is missing it says so plainly instead of half-building. `PYTOOL_VENV` moves it;
+`pip` otherwise, seeded with `pip`, `pywin32` on Windows (which is what puts `win32com` in reach), and — when
+this machine has the `draftsight-py` OpenCode skill installed — `draftsight` itself: it is not on PyPI, so it
+goes in `--editable` from `~/.config/opencode/skills/draftsight-py` (`PYTOOL_DRAFTSIGHT_SKILL` moves it),
+which means an edit to the skill lands in the venv with no reinstall. Optional packages are probed on the
+*ready* path too, so a skill added after the venv was built still gets added to it. If `python3` or the
+network is missing it says so plainly instead of half-building. `PYTOOL_VENV` moves it;
 `PYTOOL_SKIP_VENV=1` defers the build. The builder runs in-process as a module (`src/engine/venv-bootstrap.ts`
 imports it) — never as `process.execPath <script>`, because inside a compiled OpenCode that executable is the
 opencode CLI, exactly as above — and a cross-process lock in the venv's parent directory keeps the service and
@@ -114,12 +118,17 @@ cell waits on a boot that already started.
 - A cell that fails on a missing package names the interpreter that runs the kernel and prints the command that
   installs into it — `uv pip install --python "<that interpreter>" <pkg>` when uv owns the machine, that
   interpreter's own pip otherwise — plus the pip name when it differs from the import name (`PIL` → `pillow`,
-  `yaml` → `pyyaml`, `win32com` → `pywin32`). The same text is in `metadata.installHint`.
+  `yaml` → `pyyaml`, `win32com` → `pywin32`). For a local skill package (`draftsight`) the command names
+  `--editable "<skill dir>"` instead of a PyPI name that does not exist, and the tail line says the measured
+  truth for editable installs: the `.pth` is read at interpreter startup, so a kernel already running needs the
+  source tree on `sys.path` — only the next kernel boot picks the install up by itself. The same text is in
+  `metadata.installHint`.
 
 | Variable | Effect |
 | --- | --- |
 | `PYTOOL_PYTHON` | pin the interpreter, trusted without probing; the kernel exports the winner as `PYTOOL_PYTHON` for sibling skills |
 | `PYTOOL_VENV` | where the managed venv lives (build script and resolver read the same variable) |
+| `PYTOOL_DRAFTSIGHT_SKILL` | where the `draftsight-py` skill package sits when the venv carries it editable (builder and import hint read the same variable) |
 | `PYTOOL_VENV_BOOTSTRAP_MS` | budget for the lazy venv build that the first boot may trigger (`120000`); it also caps each install step, so a hung uv run cannot own the session |
 | `PYTOOL_SKIP_VENV` | `1` leaves the venv alone: a pinned or PATH interpreter has to carry the kernel |
 | `PYTOOL_BOOTSTRAP_SCRIPT` | replace the venv builder — the tests point it at a fake, an operator can point it at a wrapper that owns interpreters |

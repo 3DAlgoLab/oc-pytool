@@ -2,6 +2,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
 	capLinesForContext,
 	DEFAULT_MAX_OUTPUT_CHARS,
@@ -15,7 +17,14 @@ import { killProcessTree, KernelClient } from "../src/engine/kernel.js";
 import { managedVenvPython, pythonCandidates } from "../src/engine/python-locate.js";
 import { formatDiagnostics } from "../src/extension/diagnostics.js";
 import { composeErrorLines } from "../src/extension/error-format.js";
-import { composeImportHint, installerChoice, installerCommand, missingModuleNames, pipName } from "../src/extension/import-hint.js";
+import {
+	composeImportHint,
+	installerChoice,
+	installerCommand,
+	localPackageSource,
+	missingModuleNames,
+	pipName,
+} from "../src/extension/import-hint.js";
 import { composeShellPythonBlock, composeShellPythonNotice, detectShellPython, shellPythonMode } from "../src/extension/shell-python.js";
 import { toolResultMetadata, type PytoolDetails } from "../src/extension/tool-result.js";
 
@@ -340,6 +349,55 @@ describe("import hints", () => {
 		// nothing to say when there is nothing missing, or when the interpreter is unknown
 		expect(composeImportHint([], VENV_PY)).toEqual([]);
 		expect(composeImportHint(["numpy"], undefined)).toEqual([]);
+	});
+
+	// --- local skill packages: `draftsight` is not a PyPI name, so the bare form of the hint could never
+	// --- succeed. The builder (scripts/setup-venv.mjs) installs it editable from the OpenCode skills
+	// --- directory, and the hint has to name the same command.
+	const SKILL_DIR = process.platform === "win32" ? "C:\\skills\\draftsight-py" : "/skills/draftsight-py";
+
+	test("a local skill package is installed editable from its directory, not by a PyPI name", () => {
+		const c = installerChoice(VENV_PY, ["draftsight"], { uv: true, pip: false }, { draftsight: SKILL_DIR });
+		expect(c.command).toBe(`uv pip install --python "${VENV_PY}" --editable "${SKILL_DIR}"`);
+		expect(c.note).toContain("local skill package");
+	});
+
+	test("a mixed list keeps the editable form for the skill package and the bare name for the rest", () => {
+		const mixed = installerChoice(VENV_PY, ["draftsight", "matplotlib"], { uv: false, pip: true }, { draftsight: SKILL_DIR });
+		expect(mixed.command).toBe(`"${VENV_PY}" -m pip install --editable "${SKILL_DIR}" matplotlib`);
+	});
+
+	test("an editable hint replaces the no-restart promise with the .pth truth", () => {
+		// measured: an editable install registers through a .pth read at interpreter startup, so re-running
+		// the cell on the same kernel fails the same way even though the install reported success
+		const lines = composeImportHint(["draftsight"], VENV_PY, installerChoice(VENV_PY, ["draftsight"], { uv: true, pip: true }, { draftsight: SKILL_DIR }));
+		const joined = lines.join("\n");
+		expect(joined).toContain(".pth read at interpreter startup");
+		expect(joined).toContain("sys.path");
+		expect(joined).not.toContain("without a restart");
+		// ordinary installs keep the original line: a live interpreter does see a site-packages install
+		const plain = composeImportHint(["numpy"], VENV_PY, installerChoice(VENV_PY, ["numpy"], { uv: true, pip: true })).join("\n");
+		expect(plain).toContain("without a restart");
+	});
+
+	test("the skill directory resolves from the override, then OpenCode's config-dir rule, only if it exists", () => {
+		const home = mkdtempSync(join(tmpdir(), "pytool-hint-home-"));
+		try {
+			const skill = join(home, ".config", "opencode", "skills", "draftsight-py");
+			mkdirSync(skill, { recursive: true });
+			expect(localPackageSource("draftsight", {}, home)).toBe(skill);
+			// the operator override wins -- and an override pointing at a missing directory is no source either
+			const elsewhere = join(home, "elsewhere");
+			mkdirSync(elsewhere);
+			expect(localPackageSource("draftsight", { PYTOOL_DRAFTSIGHT_SKILL: elsewhere }, home)).toBe(elsewhere);
+			expect(localPackageSource("draftsight", { PYTOOL_DRAFTSIGHT_SKILL: join(home, "absent") }, home)).toBeUndefined();
+			// no directory, no local source: the hint falls back to the plain form rather than naming a path
+			expect(localPackageSource("draftsight", {}, join(home, "absent"))).toBeUndefined();
+			// every other package keeps the PyPI route
+			expect(localPackageSource("numpy", {}, home)).toBeUndefined();
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
 	});
 });
 

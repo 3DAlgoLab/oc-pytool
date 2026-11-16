@@ -139,4 +139,19 @@ describe("ensureManagedVenv", () => {
 		expect(child.stderr).toBe("");
 		expect(child.status).toBe(0);
 	});
+
+	test("the builder discovers local skill packages by the same config-dir rule OpenCode uses", async () => {
+		const builder = await import(pathToFileURL(join(import.meta.dir, "..", "scripts", "setup-venv.mjs")).href);
+		const noHome = join(scratch, "no-home");
+		// a machine without the skill asks for nothing, and warns about nothing
+		expect(builder.localSkillPackages({}, noHome)).toEqual([]);
+		// an installed skill resolves through the XDG config fallback
+		const skill = join(scratch, "cfg", "opencode", "skills", "draftsight-py");
+		mkdirSync(skill, { recursive: true });
+		expect(builder.localSkillPackages({ XDG_CONFIG_HOME: join(scratch, "cfg") }, noHome)).toEqual([{ imported: "draftsight", dir: skill }]);
+		// the operator override wins over the config-dir rule
+		const explicit = join(scratch, "skill-elsewhere");
+		mkdirSync(explicit);
+		expect(builder.localSkillPackages({ PYTOOL_DRAFTSIGHT_SKILL: explicit }, noHome)[0]?.dir).toBe(explicit);
+	});
 });

@@ -54,6 +54,23 @@ export const CORE_MODULES = ["ipykernel", "jupyter_client"];
 const EXTRA_PACKAGES = WIN ? [["pywin32", "win32com"]] : [];
 const INSTALL_PACKAGES = [...CORE_MODULES, ...EXTRA_PACKAGES.map(([pip]) => pip)];
 
+/**
+ * The libraries that exist only on this machine: OpenCode skill packages, not on PyPI. `draftsight` is the
+ * reason this tool exists on Windows -- the draftsight-py skill drives DraftSight over COM from the kernel --
+ * and it lives in OpenCode's global skills directory, so it goes into the venv `--editable` from there: an
+ * edit to the skill then takes effect in the venv with no reinstall (the .pth is read at interpreter
+ * startup, so a kernel that is already running is the one thing that will not see it).
+ *
+ * Discovery follows OpenCode's own config-dir rule -- the same XDG fallback as managedVenvDir's data-dir
+ * rule -- with PYTOOL_DRAFTSIGHT_SKILL as the operator override. A skill that is not on this machine
+ * contributes nothing quietly: an absent optional skill is no one's warning.
+ */
+export function localSkillPackages(env = process.env, home = homedir()) {
+	const dir =
+		env.PYTOOL_DRAFTSIGHT_SKILL || join(env.XDG_CONFIG_HOME || join(home, ".config"), "opencode", "skills", "draftsight-py");
+	return existsSync(dir) ? [{ imported: "draftsight", dir }] : [];
+}
+
 /** Wall clock one step gets; a hung installer must not sit on the session forever. */
 const STEP_TIMEOUT_MS = 900_000;
 
@@ -132,12 +149,37 @@ async function systemPythons() {
 	return null;
 }
 
-/** An optional package that failed to land is worth reporting, but must not fail the whole install. */
-async function reportExtras(py, warn) {
-	const missing = await missingModules(py, EXTRA_PACKAGES.map(([, imported]) => imported));
-	if (missing.length === 0) return;
-	const names = EXTRA_PACKAGES.filter(([, imported]) => missing.includes(imported)).map(([pip]) => pip);
-	warn(`installed but not importable: ${names.join(", ")} - COM work will not load.`);
+/**
+ * The optional packages the venv should carry but does not: the COM extras, and the local skill packages
+ * this machine actually has (localSkillPackages). Neither kind is fatal -- the evaluator boots without
+ * them -- so each is installed once, read back, and reported with the exact command if it still will not
+ * import. This runs on the "ready" path too, which is what carries a skill added after the venv was built
+ * into the venv; without it the next session pays for a ModuleNotFoundError and has to re-derive the
+ * install command the builder would have known.
+ */
+async function repairExtras(py, uv, warn, log, opts = {}, env = process.env) {
+	const wanted = [
+		...EXTRA_PACKAGES.map(([pip, imported]) => ({ pip, imported })),
+		...localSkillPackages(env).map((p) => ({ ...p })),
+	];
+	if (wanted.length === 0) return;
+	const gone = await missingModules(py, wanted.map((w) => w.imported));
+	for (const w of wanted.filter((x) => gone.includes(x.imported))) {
+		const spec = w.dir ? ["--editable", w.dir] : [w.pip];
+		const manual = `${uv ? `uv pip install --python "${py}" ` : `"${py}" -m pip install `}${w.dir ? `--editable "${w.dir}"` : w.pip}`;
+		try {
+			const r = uv
+				? await run("uv", ["pip", "install", "--python", py, ...spec], { timeoutMs: stepMs(opts), quiet: opts.quiet })
+				: await run(py, ["-m", "pip", "install", ...spec], { timeoutMs: stepMs(opts), quiet: opts.quiet });
+			if (r.ok && (await missingModules(py, [w.imported])).length === 0) {
+				log(`added ${w.imported} to the venv${w.dir ? ` (editable from ${w.dir})` : ""}.`);
+			} else {
+				warn(`${w.imported} is still not importable next to ${py}; work that needs it will not load. add it with: ${manual}`);
+			}
+		} catch (error) {
+			warn(`could not install ${w.imported} (${error?.message ?? error}); add it with: ${manual}`);
+		}
+	}
 }
 
 /**
@@ -249,6 +291,7 @@ export async function setupManagedVenv(options = {}) {
 	const missing = existsSync(py) ? await missingModules(py, CORE_MODULES) : null;
 	if (missing && missing.length === 0) {
 		await ensurePip(py, uv, warn, log, step);
+		await repairExtras(py, uv, warn, log, step, env);
 		log(`venv ready (${INSTALL_PACKAGES.join(", ")}) at ${venvDir}`);
 		log(`add packages with: ${addPackagesHint(uv, py)}`);
 		return done("ready");
@@ -264,8 +307,8 @@ export async function setupManagedVenv(options = {}) {
 		const still = await missingModules(py, CORE_MODULES);
 		if (still.length > 0)
 			return done("failed", { detail: `deps still not importable after install: ${still.join(", ")} - the evaluator won't start.` });
-		await reportExtras(py, warn);
 		await ensurePip(py, uv, warn, log, step);
+		await repairExtras(py, uv, warn, log, step, env);
 		log("done. pytool will use this venv.");
 		log(`add packages with: ${addPackagesHint(uv, py)}`);
 		return done("repaired");
@@ -298,8 +341,8 @@ export async function setupManagedVenv(options = {}) {
 		const still = await missingModules(py, CORE_MODULES);
 		if (still.length > 0)
 			return done("failed", { detail: `runtime deps still not importable after install: ${still.join(", ")} - the evaluator won't start.` });
-		await reportExtras(py, warn);
 		await ensurePip(py, uv, warn, log, step);
+		await repairExtras(py, uv, warn, log, step, env);
 		log(`done. pytool will use this venv (${INSTALL_PACKAGES.join(", ")}).`);
 		log(`add packages with: ${addPackagesHint(uv, py)}`);
 		return done("created");
